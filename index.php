@@ -1,0 +1,295 @@
+<?php
+use Psr\Http\Message\ResponseInterface as Response;
+use Psr\Http\Message\ServerRequestInterface as Request;
+use Slim\Factory\AppFactory;
+
+require __DIR__ . '/vendor/autoload.php';
+
+$app = AppFactory::create();
+
+$host    = 'localhost';
+$db      = 'verificaasorpresa';
+$user    = 'mecja_kevin';
+$pass    = 'mEcjA69@104';
+$charset = 'utf8mb4';
+$dsn     = "mysql:host=$host;dbname=$db;charset=$charset";
+
+try {
+    $pdo = new PDO($dsn, $user, $pass, [
+        PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+    ]);
+} catch (PDOException $e) {
+    http_response_code(500);
+    die(json_encode(['errore' => 'Connessione fallita: ' . $e->getMessage()]));
+}
+
+function queryDB(PDO $pdo, string $sql, array $params = []): array {
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    return $stmt->fetchAll();
+}
+
+$queries = [
+    1  => "SELECT DISTINCT p.pnome FROM Pezzi p JOIN Catalogo c ON p.pid = c.pid",
+    2  => "SELECT f.fnome FROM Fornitori f WHERE NOT EXISTS (SELECT * FROM Pezzi p WHERE NOT EXISTS (SELECT * FROM Catalogo c WHERE c.fid = f.fid AND c.pid = p.pid))",
+    3  => "SELECT f.fnome FROM Fornitori f WHERE NOT EXISTS (SELECT * FROM Pezzi p WHERE p.colore = 'rosso' AND NOT EXISTS (SELECT * FROM Catalogo c WHERE c.fid = f.fid AND c.pid = p.pid))",
+    4  => "SELECT p.pnome FROM Pezzi p JOIN Catalogo c ON p.pid = c.pid JOIN Fornitori f ON f.fid = c.fid WHERE f.fnome = 'Acme' AND NOT EXISTS (SELECT * FROM Catalogo c2 WHERE c2.pid = p.pid AND c2.fid <> f.fid)",
+    5  => "SELECT DISTINCT c.fid FROM Catalogo c WHERE c.costo > (SELECT AVG(c2.costo) FROM Catalogo c2 WHERE c2.pid = c.pid)",
+    6  => "SELECT p.pid, f.fnome FROM Pezzi p JOIN Catalogo c ON p.pid = c.pid JOIN Fornitori f ON f.fid = c.fid WHERE c.costo = (SELECT MAX(c2.costo) FROM Catalogo c2 WHERE c2.pid = p.pid)",
+    7  => "SELECT f.fid FROM Fornitori f WHERE EXISTS (SELECT * FROM Catalogo c JOIN Pezzi p ON p.pid = c.pid WHERE c.fid = f.fid) AND NOT EXISTS (SELECT * FROM Catalogo c JOIN Pezzi p ON p.pid = c.pid WHERE c.fid = f.fid AND p.colore <> 'rosso')",
+    8  => "SELECT f.fid FROM Fornitori f WHERE EXISTS (SELECT * FROM Catalogo c JOIN Pezzi p ON p.pid = c.pid WHERE c.fid = f.fid AND p.colore = 'rosso') AND EXISTS (SELECT * FROM Catalogo c JOIN Pezzi p ON p.pid = c.pid WHERE c.fid = f.fid AND p.colore = 'verde')",
+    9  => "SELECT DISTINCT c.fid FROM Catalogo c JOIN Pezzi p ON p.pid = c.pid WHERE p.colore = 'rosso' OR p.colore = 'verde'",
+    10 => "SELECT pid FROM Catalogo GROUP BY pid HAVING COUNT(DISTINCT fid) >= 2",
+];
+
+function configBar() {
+    return '<hr class="section-divider"/>';
+}
+
+function renderPage(Response $res, string $activeQuery, string $pageContent): Response {
+    $navItems = [
+        'q1'  => ['label' => 'Pezzi con fornitori',          'num' => '01'],
+        'q2'  => ['label' => 'Fornitori con tutti i pezzi',  'num' => '02'],
+        'q3'  => ['label' => 'Fornitori pezzi rossi',        'num' => '03'],
+        'q4'  => ['label' => 'Pezzi solo Acme',              'num' => '04'],
+        'q5'  => ['label' => 'Fornitori sopra media',        'num' => '05'],
+        'q6'  => ['label' => 'Fornitori max ricarico',       'num' => '06'],
+        'q7'  => ['label' => 'Fornitori solo rossi',         'num' => '07'],
+        'q8'  => ['label' => 'Fornitori rosso e verde',      'num' => '08'],
+        'q9'  => ['label' => 'Fornitori rosso o verde',      'num' => '09'],
+        'q10' => ['label' => 'Pezzi almeno 2 fornitori',     'num' => '10'],
+    ];
+
+    $navHtml = '';
+    foreach ($navItems as $qid => $item) {
+        $activeClass = ($qid === $activeQuery) ? 'active' : '';
+        $navHtml .= '<li><a href="/frontend/' . $qid . '" class="' . $activeClass . '">';
+        $navHtml .= '<span class="num">' . $item['num'] . '</span> ' . $item['label'];
+        $navHtml .= '</a></li>' . "\n";
+    }
+
+    $css = '
+    :root {
+      --accent: #5ba08e; --accent-light: rgba(91,160,142,0.15); --bg: #141718;
+      --surface: #1e2122; --sidebar-bg: #111314; --sidebar-text: #8a9399;
+      --sidebar-active: #5ba08e; --border: #2a2e30; --text: #dde3e6;
+      --muted: #606870; --danger: #e05c5c; --danger-bg: rgba(224,92,92,0.1);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: "Nunito", sans-serif; min-height: 100vh; display: flex; }
+    #sidebar { width: 270px; min-height: 100vh; background: var(--sidebar-bg); display: flex; flex-direction: column; position: fixed; top: 0; left: 0; z-index: 100; transition: transform 0.3s; }
+    .sidebar-header { padding: 28px 24px 20px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+    .sidebar-header h1 { font-size: 1.1rem; font-weight: 700; color: #ffffff; }
+    .sidebar-header p { font-size: 0.78rem; color: var(--sidebar-text); margin-top: 4px; }
+    .nav-list { list-style: none; padding: 12px 0; flex: 1; overflow-y: auto; }
+    .nav-list li a { display: flex; align-items: center; gap: 12px; padding: 10px 24px; color: var(--sidebar-text); text-decoration: none; font-size: 0.88rem; font-weight: 600; transition: all 0.2s; border-left: 3px solid transparent; }
+    .nav-list li a:hover { color: #ffffff; background: rgba(255,255,255,0.06); }
+    .nav-list li a.active { color: var(--sidebar-active); border-left-color: var(--sidebar-active); background: rgba(129,199,184,0.1); }
+    .nav-list li a .num { font-family: "Fira Code", monospace; font-size: 0.7rem; background: rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 6px; min-width: 30px; text-align: center; flex-shrink: 0; }
+    .nav-list li a.active .num { background: var(--sidebar-active); color: var(--sidebar-bg); }
+    #main { margin-left: 270px; flex: 1; padding: 40px 48px 80px; min-height: 100vh; animation: fadeIn 0.2s ease; }
+    .section-header { margin-bottom: 24px; }
+    .section-header .tag { font-family: "Fira Code", monospace; font-size: 0.72rem; color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; background: var(--accent-light); display: inline-block; padding: 3px 10px; border-radius: 20px; margin-bottom: 8px; }
+    .section-header h2 { font-size: 1.7rem; font-weight: 700; margin-bottom: 6px; color: var(--text); line-height: 1.3; }
+    .section-header p { color: var(--muted); font-size: 0.93rem; max-width: 600px; line-height: 1.6; }
+    .sql-block { background: #0e1a24; border-radius: 8px; padding: 16px 20px; font-family: "Fira Code", monospace; font-size: 0.8rem; color: #a8d8c8; margin-bottom: 20px; overflow-x: auto; white-space: pre; line-height: 1.8; }
+    .btn-fetch { font-family: "Nunito", sans-serif; font-size: 0.9rem; font-weight: 700; background: var(--accent); color: #ffffff; border: none; border-radius: 8px; padding: 10px 28px; cursor: pointer; transition: background 0.2s, transform 0.1s; }
+    .btn-fetch:hover { background: #3a6459; }
+    .btn-fetch:active { transform: scale(0.98); }
+    .btn-fetch:disabled { opacity: 0.5; cursor: not-allowed; }
+    .section-divider { border: none; border-top: 1px solid var(--border); margin: 28px 0; }
+    .result-area { margin-top: 24px; }
+    .result-meta { font-size: 0.8rem; color: var(--muted); margin-bottom: 10px; font-family: "Fira Code", monospace; }
+    .result-meta span { color: var(--accent); font-weight: 600; }
+    .table-wrapper { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); }
+    table { width: 100%; border-collapse: collapse; }
+    thead tr { background: #252a2c; border-bottom: 1px solid var(--border); }
+    thead th { padding: 12px 16px; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 700; text-align: left; }
+    tbody tr { border-bottom: 1px solid var(--border); transition: background 0.15s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: rgba(91,160,142,0.05); }
+    tbody td { padding: 11px 16px; font-size: 0.9rem; color: var(--text); }
+    .empty-state { padding: 48px; text-align: center; color: var(--muted); font-size: 0.9rem; background: var(--surface); border-radius: 8px; border: 1px solid var(--border); }
+    .error-state { padding: 16px 20px; background: var(--danger-bg); border: 1px solid rgba(224,92,92,0.3); border-radius: 8px; color: var(--danger); font-size: 0.85rem; }
+    .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #ffffff; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    #menu-toggle { display: none; position: fixed; top: 16px; left: 16px; z-index: 200; background: var(--accent); color: #ffffff; border: none; border-radius: 6px; padding: 8px 12px; font-size: 1.1rem; cursor: pointer; }
+    @media (max-width: 768px) { #sidebar { transform: translateX(-100%); } #sidebar.open { transform: translateX(0); } #main { margin-left: 0; padding: 24px 16px 60px; padding-top: 70px; } #menu-toggle { display: block; } }
+    ';
+
+    $js = '
+    async function fetchData(endpoint, btn, resultId) {
+        const resultDiv = document.getElementById(resultId);
+        btn.disabled = true;
+        btn.innerHTML = "<span class=\"spinner\"></span> Caricamento...";
+        resultDiv.innerHTML = "";
+        try {
+            const res = await fetch(endpoint, { headers: { "Accept": "application/json" } });
+            if (!res.ok) throw new Error("HTTP " + res.status + " - " + res.statusText);
+            const data = await res.json();
+            renderTable(resultDiv, data);
+        } catch (err) {
+            resultDiv.innerHTML = "<div class=\"error-state\">⚠ Errore: " + err.message + "</div>";
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = "▶ Esegui Query";
+        }
+    }
+    function renderTable(container, data) {
+        if (!Array.isArray(data) || data.length === 0) {
+            container.innerHTML = "<div class=\"empty-state\">Nessun risultato trovato.</div>";
+            return;
+        }
+        const cols = Object.keys(data[0]);
+        let html = "<div class=\"result-meta\">Risultati: <span>" + data.length + "</span> righe</div>";
+        html += "<div class=\"table-wrapper\"><table><thead><tr>";
+        cols.forEach(c => { html += "<th>" + c + "</th>"; });
+        html += "</tr></thead><tbody>";
+        data.forEach(row => {
+            html += "<tr>";
+            cols.forEach(c => { html += "<td>" + (row[c] ?? "—") + "</td>"; });
+            html += "</tr>";
+        });
+        html += "</tbody></table></div>";
+        container.innerHTML = html;
+    }
+    ';
+
+    $html  = '<!DOCTYPE html><html lang="it"><head>';
+    $html .= '<meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/>';
+    $html .= '<title>Catalogo Fornitori</title>';
+    $html .= '<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>';
+    $html .= '<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet"/>';
+    $html .= '<style>' . $css . '</style></head><body>';
+    $html .= '<button id="menu-toggle" onclick="document.getElementById(\'sidebar\').classList.toggle(\'open\')">☰</button>';
+    $html .= '<nav id="sidebar"><div class="sidebar-header"><h1>Catalogo DB</h1><p>10 endpoint · Slim Framework</p></div>';
+    $html .= '<ul class="nav-list">' . $navHtml . '</ul></nav>';
+    $html .= '<main id="main">' . $pageContent . '</main>';
+    $html .= '<script>' . $js . '</script></body></html>';
+
+    $res->getBody()->write($html);
+    return $res->withHeader('Content-Type', 'text/html');
+}
+
+$app->addRoutingMiddleware();
+$app->addErrorMiddleware(true, true, true);
+
+$app->add(function (Request $request, $handler) {
+    $response = $handler->handle($request);
+    return $response
+        ->withHeader('Access-Control-Allow-Origin', '*')
+        ->withHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        ->withHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+});
+
+$app->options('/{routes:.+}', function (Request $request, Response $response) {
+    return $response;
+});
+
+// ── ROTTE API (backend) ────────────────────────────────────────────────────
+foreach ($queries as $num => $sql) {
+    $app->get("/api/$num", function (Request $request, Response $response) use ($pdo, $sql) {
+        $data = queryDB($pdo, $sql);
+        $response->getBody()->write(json_encode($data));
+        return $response->withHeader('Content-Type', 'application/json');
+    });
+}
+
+// ── ROTTE FRONTEND ─────────────────────────────────────────────────────────
+$app->get('/', function (Request $req, Response $res) {
+    return $res->withHeader('Location', '/frontend/q1')->withStatus(302);
+});
+
+$app->get('/frontend/q1', function (Request $req, Response $res) {
+    $content  = '<div class="section-header"><div class="tag">Query 01</div><h2>Pezzi con fornitori</h2><p>Restituisce i nomi dei pezzi che hanno almeno un fornitore nel catalogo.</p></div>';
+    $content .= configBar();
+    $content .= '<div class="sql-block">SELECT DISTINCT p.pnome' . "\n" . 'FROM Pezzi p' . "\n" . 'JOIN Catalogo c ON p.pid = c.pid</div>';
+    $content .= '<button class="btn-fetch" onclick="fetchData(\'/api/1\', this, \'result\')">▶ Esegui Query</button>';
+    $content .= '<div class="result-area" id="result"></div>';
+    return renderPage($res, 'q1', $content);
+});
+
+$app->get('/frontend/q2', function (Request $req, Response $res) {
+    $content  = '<div class="section-header"><div class="tag">Query 02</div><h2>Fornitori con tutti i pezzi</h2><p>Fornitori che forniscono ogni pezzo presente nel catalogo.</p></div>';
+    $content .= configBar();
+    $content .= '<div class="sql-block">SELECT f.fnome FROM Fornitori f' . "\n" . 'WHERE NOT EXISTS (' . "\n" . '    SELECT * FROM Pezzi p' . "\n" . '    WHERE NOT EXISTS (' . "\n" . '        SELECT * FROM Catalogo c WHERE c.pid=p.pid AND c.fid=f.fid' . "\n" . '    )' . "\n" . ')</div>';
+    $content .= '<button class="btn-fetch" onclick="fetchData(\'/api/2\', this, \'result\')">▶ Esegui Query</button>';
+    $content .= '<div class="result-area" id="result"></div>';
+    return renderPage($res, 'q2', $content);
+});
+
+$app->get('/frontend/q3', function (Request $req, Response $res) {
+    $content  = '<div class="section-header"><div class="tag">Query 03</div><h2>Fornitori con tutti i pezzi rossi</h2><p>Fornitori che forniscono almeno tutti i pezzi di colore rosso.</p></div>';
+    $content .= configBar();
+    $content .= '<div class="sql-block">SELECT f.fnome FROM Fornitori f' . "\n" . 'WHERE NOT EXISTS (' . "\n" . '    SELECT * FROM Pezzi p WHERE colore=\'rosso\'' . "\n" . '    AND NOT EXISTS (' . "\n" . '        SELECT * FROM Catalogo c WHERE c.pid=p.pid AND c.fid=f.fid' . "\n" . '    )' . "\n" . ')</div>';
+    $content .= '<button class="btn-fetch" onclick="fetchData(\'/api/3\', this, \'result\')">▶ Esegui Query</button>';
+    $content .= '<div class="result-area" id="result"></div>';
+    return renderPage($res, 'q3', $content);
+});
+
+$app->get('/frontend/q4', function (Request $req, Response $res) {
+    $content  = '<div class="section-header"><div class="tag">Query 04</div><h2>Pezzi forniti solo da Acme</h2><p>Pezzi forniti esclusivamente dal fornitore Acme.</p></div>';
+    $content .= configBar();
+    $content .= '<div class="sql-block">SELECT p.pnome FROM Pezzi p' . "\n" . 'JOIN Catalogo c ON p.pid=c.pid' . "\n" . 'JOIN Fornitori f ON f.fid=c.fid' . "\n" . 'WHERE f.fnome=\'Acme\'' . "\n" . 'AND NOT EXISTS (' . "\n" . '    SELECT * FROM Catalogo c2 WHERE c2.pid=p.pid AND c2.fid &lt;&gt; f.fid' . "\n" . ')</div>';
+    $content .= '<button class="btn-fetch" onclick="fetchData(\'/api/4\', this, \'result\')">▶ Esegui Query</button>';
+    $content .= '<div class="result-area" id="result"></div>';
+    return renderPage($res, 'q4', $content);
+});
+
+$app->get('/frontend/q5', function (Request $req, Response $res) {
+    $content  = '<div class="section-header"><div class="tag">Query 05</div><h2>Fornitori con costo sopra la media</h2><p>Fornitori con almeno un pezzo con costo superiore alla media.</p></div>';
+    $content .= configBar();
+    $content .= '<div class="sql-block">SELECT DISTINCT c.fid FROM Catalogo c' . "\n" . 'WHERE c.costo &gt; (' . "\n" . '    SELECT AVG(c2.costo) FROM Catalogo c2 WHERE c2.pid=c.pid' . "\n" . ')</div>';
+    $content .= '<button class="btn-fetch" onclick="fetchData(\'/api/5\', this, \'result\')">▶ Esegui Query</button>';
+    $content .= '<div class="result-area" id="result"></div>';
+    return renderPage($res, 'q5', $content);
+});
+
+$app->get('/frontend/q6', function (Request $req, Response $res) {
+    $content  = '<div class="section-header"><div class="tag">Query 06</div><h2>Fornitori con costo massimo per pezzo</h2><p>Per ogni pezzo, il fornitore che lo vende al prezzo più alto.</p></div>';
+    $content .= configBar();
+    $content .= '<div class="sql-block">SELECT p.pid, f.fnome FROM Pezzi p' . "\n" . 'JOIN Catalogo c ON p.pid=c.pid' . "\n" . 'JOIN Fornitori f ON f.fid=c.fid' . "\n" . 'WHERE c.costo = (' . "\n" . '    SELECT MAX(c2.costo) FROM Catalogo c2 WHERE c2.pid=p.pid' . "\n" . ')</div>';
+    $content .= '<button class="btn-fetch" onclick="fetchData(\'/api/6\', this, \'result\')">▶ Esegui Query</button>';
+    $content .= '<div class="result-area" id="result"></div>';
+    return renderPage($res, 'q6', $content);
+});
+
+$app->get('/frontend/q7', function (Request $req, Response $res) {
+    $content  = '<div class="section-header"><div class="tag">Query 07</div><h2>Fornitori che vendono solo pezzi rossi</h2><p>Fornitori il cui catalogo contiene esclusivamente pezzi rossi.</p></div>';
+    $content .= configBar();
+    $content .= '<div class="sql-block">SELECT f.fid FROM Fornitori f' . "\n" . 'WHERE EXISTS (' . "\n" . '    SELECT * FROM Catalogo c JOIN Pezzi p ON p.pid=c.pid WHERE c.fid=f.fid' . "\n" . ')' . "\n" . 'AND NOT EXISTS (' . "\n" . '    SELECT * FROM Catalogo c JOIN Pezzi p ON p.pid=c.pid' . "\n" . '    WHERE c.fid=f.fid AND p.colore &lt;&gt; \'rosso\'' . "\n" . ')</div>';
+    $content .= '<button class="btn-fetch" onclick="fetchData(\'/api/7\', this, \'result\')">▶ Esegui Query</button>';
+    $content .= '<div class="result-area" id="result"></div>';
+    return renderPage($res, 'q7', $content);
+});
+
+$app->get('/frontend/q8', function (Request $req, Response $res) {
+    $content  = '<div class="section-header"><div class="tag">Query 08</div><h2>Fornitori con pezzi rossi E verdi</h2><p>Fornitori con almeno un pezzo rosso e almeno uno verde.</p></div>';
+    $content .= configBar();
+    $content .= '<div class="sql-block">SELECT f.fid FROM Fornitori f' . "\n" . 'WHERE EXISTS (' . "\n" . '    SELECT * FROM Catalogo c JOIN Pezzi p ON p.pid=c.pid WHERE c.fid=f.fid AND p.colore=\'rosso\'' . "\n" . ')' . "\n" . 'AND EXISTS (' . "\n" . '    SELECT * FROM Catalogo c JOIN Pezzi p ON p.pid=c.pid WHERE c.fid=f.fid AND p.colore=\'verde\'' . "\n" . ')</div>';
+    $content .= '<button class="btn-fetch" onclick="fetchData(\'/api/8\', this, \'result\')">▶ Esegui Query</button>';
+    $content .= '<div class="result-area" id="result"></div>';
+    return renderPage($res, 'q8', $content);
+});
+
+$app->get('/frontend/q9', function (Request $req, Response $res) {
+    $content  = '<div class="section-header"><div class="tag">Query 09</div><h2>Fornitori con pezzi rossi O verdi</h2><p>Fornitori con almeno un pezzo rosso oppure verde.</p></div>';
+    $content .= configBar();
+    $content .= '<div class="sql-block">SELECT DISTINCT c.fid FROM Catalogo c' . "\n" . 'JOIN Pezzi p ON p.pid=c.pid' . "\n" . 'WHERE p.colore=\'rosso\' OR p.colore=\'verde\'</div>';
+    $content .= '<button class="btn-fetch" onclick="fetchData(\'/api/9\', this, \'result\')">▶ Esegui Query</button>';
+    $content .= '<div class="result-area" id="result"></div>';
+    return renderPage($res, 'q9', $content);
+});
+
+$app->get('/frontend/q10', function (Request $req, Response $res) {
+    $content  = '<div class="section-header"><div class="tag">Query 10</div><h2>Pezzi con almeno 2 fornitori</h2><p>Pezzi presenti nel catalogo di almeno due fornitori distinti.</p></div>';
+    $content .= configBar();
+    $content .= '<div class="sql-block">SELECT pid FROM Catalogo' . "\n" . 'GROUP BY pid' . "\n" . 'HAVING COUNT(DISTINCT fid) &gt;= 2</div>';
+    $content .= '<button class="btn-fetch" onclick="fetchData(\'/api/10\', this, \'result\')">▶ Esegui Query</button>';
+    $content .= '<div class="result-area" id="result"></div>';
+    return renderPage($res, 'q10', $content);
+});
+
+$app->run();
