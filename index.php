@@ -101,7 +101,7 @@ $app->addBodyParsingMiddleware();
 $app->addRoutingMiddleware();
 $app->addErrorMiddleware(true, true, true);
 
-// ── INCLUDE FRONTEND ───────────────────────────────────────────────────────
+// ── FRONTEND ───────────────────────────────────────────────────────
 // Le route del frontend (dashboard, query pages) sono in un file separato
 require __DIR__ . '/frontend.php';
 

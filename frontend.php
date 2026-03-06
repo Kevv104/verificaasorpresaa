@@ -14,10 +14,7 @@ function configBar(): string {
     return '<hr class="section-divider"/>';
 }
 
-/**
- * Genera la pagina HTML completa con sidebar + contenuto.
- * Usata da tutte le route frontend.
- */
+
 function renderPage(Response $res, string $activeQuery, string $pageContent): Response {
     $navItems = [
         'q1'  => ['label' => 'Pezzi con fornitori',         'num' => '01'],
