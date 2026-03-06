@@ -24,7 +24,7 @@ cd verificaasorpresaa
 composer install
 
 # 3. Avvia il server
-php -S localhost:8080
+php -S localhost:8080 index.php
 ```
 
 Assicurati che il database `verificaasorpresa` esista e che la tabella `Utenti` sia configurata.  
@@ -36,10 +36,13 @@ Credenziali default: **admin / admin123**
 
 ```
 verificaasorpresaa/
-├── index.php        # Tutto il backend + frontend
+├── index.php        # Backend: connessione DB, helper, middleware, route /api/*
+├── frontend.php     # Frontend: renderPage, dashboard, pagine query
 ├── vendor/          # Librerie Composer
 └── composer.json
 ```
+
+> `index.php` include automaticamente `frontend.php` — il punto di ingresso è sempre e solo `index.php`.
 
 ---
 
